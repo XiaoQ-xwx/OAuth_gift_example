@@ -42,7 +42,10 @@ public class GiftManager {
 
     private final Path dataDir;
     private final Logger logger;
-    private final Set<UUID> giftedPlayers = ConcurrentHashMap.newKeySet();
+    /** MC player UUID → LinuxDO ID that was used to claim the gift (for cross-MC dedup). */
+    private final Map<UUID, String> giftedPlayers = new ConcurrentHashMap<>();
+    /** LinuxDO IDs that have already been used to claim a gift — prevents LD sharing across MC accounts. */
+    private final Set<String> giftedLinuxDoIds = ConcurrentHashMap.newKeySet();
 
     public GiftManager(Path dataDir, FileConfiguration config, Logger logger) {
         this.dataDir = dataDir;
@@ -120,13 +123,22 @@ public class GiftManager {
 
     /**
      * Give rewards to a player based on their trust level.
-     * Does nothing if the player has already received gifts.
+     * Does nothing if the player has already received gifts (checked by both
+     * MC UUID and LinuxDO ID to prevent cross-account gift farming).
      *
      * @param player     the online player receiving gifts
      * @param trustLevel the player's LinuxDO trust level (0-4)
+     * @param linuxDoId  the LinuxDO account ID used for binding (for cross-MC dedup)
      */
-    public void giveGifts(Player player, int trustLevel) {
-        if (giftedPlayers.contains(player.getUniqueId())) {
+    public void giveGifts(Player player, int trustLevel, String linuxDoId) {
+        // Cross-MC dedup: each LinuxDO account can only claim gifts once
+        if (giftedLinuxDoIds.contains(linuxDoId)) {
+            logger.info("LinuxDO account " + linuxDoId + " already used for gift by another player, skipping " + player.getName());
+            player.sendMessage("§6[OAuth_gift] §c该 LinuxDO 账号已被其他玩家用于领取礼物，无法重复领取。");
+            return;
+        }
+
+        if (giftedPlayers.containsKey(player.getUniqueId())) {
             logger.info("Player " + player.getName() + " already received gifts, skipping");
             return;
         }
@@ -140,8 +152,9 @@ public class GiftManager {
         if (trustLevel == 4) {
             player.setOp(true);
             player.sendMessage("§6[OAuth_gift] §e你的 LinuxDO 信任等级为 TL4，已获得 OP 权限！");
-            logger.info("Granted OP to " + player.getName() + " (TL4)");
-            giftedPlayers.add(player.getUniqueId());
+            logger.info("Granted OP to " + player.getName() + " (TL4, LD: " + linuxDoId + ")");
+            giftedPlayers.put(player.getUniqueId(), linuxDoId);
+            giftedLinuxDoIds.add(linuxDoId);
             saveGiftedPlayers();
             return;
         }
@@ -159,8 +172,9 @@ public class GiftManager {
 
         String tlLabel = "TL" + trustLevel;
         player.sendMessage("§6[OAuth_gift] §a你的 LinuxDO 信任等级为 " + tlLabel + "，已发放对应的礼物！");
-        logger.info("Gave " + tlLabel + " gifts to " + player.getName());
-        giftedPlayers.add(player.getUniqueId());
+        logger.info("Gave " + tlLabel + " gifts to " + player.getName() + " (LD: " + linuxDoId + ")");
+        giftedPlayers.put(player.getUniqueId(), linuxDoId);
+        giftedLinuxDoIds.add(linuxDoId);
         saveGiftedPlayers();
     }
 
@@ -182,21 +196,24 @@ public class GiftManager {
 
     /**
      * Reset a player's gift record, allowing them to receive gifts again.
+     * Also cleans up the associated LinuxDO ID from the cross-MC dedup set.
      *
      * @param playerId the player's UUID
      * @return true if the player had a gift record and it was reset
      */
     public boolean resetGift(UUID playerId) {
-        boolean existed = giftedPlayers.remove(playerId);
-        if (existed) {
+        String ldId = giftedPlayers.remove(playerId);
+        if (ldId != null) {
+            giftedLinuxDoIds.remove(ldId);
             saveGiftedPlayers();
+            return true;
         }
-        return existed;
+        return false;
     }
 
     /** Check whether a player has already received their gift. */
     public boolean hasReceivedGift(UUID playerId) {
-        return giftedPlayers.contains(playerId);
+        return giftedPlayers.containsKey(playerId);
     }
 
     /** Number of players who have received gifts (for status display). */
@@ -227,14 +244,45 @@ public class GiftManager {
 
         try {
             YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file.toFile());
-            for (String uuidStr : yaml.getStringList(KEY_GIFTED_PLAYERS)) {
-                try {
-                    giftedPlayers.add(UUID.fromString(uuidStr));
-                } catch (IllegalArgumentException e) {
-                    logger.warning("跳过无效的 UUID: " + uuidStr);
-                }
+            Object giftedData = yaml.get(KEY_GIFTED_PLAYERS);
+
+            if (giftedData == null) {
+                logger.info(GIFTED_FILE + " 中无礼物记录");
+                return;
             }
-            logger.info("已加载 " + giftedPlayers.size() + " 条礼物领取记录");
+
+            if (giftedData instanceof List) {
+                // Old format: list of UUID strings (no LD ID tracking)
+                @SuppressWarnings("unchecked")
+                List<String> uuidList = (List<String>) giftedData;
+                for (String uuidStr : uuidList) {
+                    try {
+                        giftedPlayers.put(UUID.fromString(uuidStr), "");
+                    } catch (IllegalArgumentException e) {
+                        logger.warning("跳过无效的 UUID: " + uuidStr);
+                    }
+                }
+                logger.info("已加载 " + giftedPlayers.size() + " 条礼物领取记录（旧格式，无 LD 去重）");
+            } else if (yaml.isConfigurationSection(KEY_GIFTED_PLAYERS)) {
+                // New format: UUID → LinuxDO ID map
+                var section = yaml.getConfigurationSection(KEY_GIFTED_PLAYERS);
+                if (section != null) {
+                    for (String uuidStr : section.getKeys(false)) {
+                        try {
+                            UUID uuid = UUID.fromString(uuidStr);
+                            String ldId = section.getString(uuidStr, "");
+                            giftedPlayers.put(uuid, ldId);
+                            if (!ldId.isEmpty()) {
+                                giftedLinuxDoIds.add(ldId);
+                            }
+                        } catch (IllegalArgumentException e) {
+                            logger.warning("跳过无效的 UUID: " + uuidStr);
+                        }
+                    }
+                }
+                logger.info("已加载 " + giftedPlayers.size() + " 条礼物领取记录（"
+                        + giftedLinuxDoIds.size() + " 个 LD 账号已去重）");
+            }
         } catch (Exception e) {
             logger.log(Level.WARNING, "加载 " + GIFTED_FILE + " 失败，将从空记录开始", e);
         }
@@ -246,8 +294,10 @@ public class GiftManager {
 
         try {
             YamlConfiguration yaml = new YamlConfiguration();
-            yaml.set(KEY_GIFTED_PLAYERS,
-                    giftedPlayers.stream().map(UUID::toString).collect(Collectors.toList()));
+            for (var entry : giftedPlayers.entrySet()) {
+                yaml.set(KEY_GIFTED_PLAYERS + "." + entry.getKey().toString(),
+                        entry.getValue());
+            }
 
             // Atomic write: temp file → rename
             yaml.save(tempFile.toFile());

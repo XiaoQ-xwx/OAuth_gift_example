@@ -30,6 +30,7 @@ public class GiftListener implements Listener {
     @EventHandler
     public void onOAuthSuccess(PlayerOAuthSuccessEvent event) {
         int trustLevel = event.getAccount().trustLevel();
+        String linuxDoId = event.getAccount().linuxDoId();
         Player player = Bukkit.getPlayer(event.getAccount().playerId());
 
         if (player == null || !player.isOnline()) {
@@ -37,7 +38,7 @@ public class GiftListener implements Listener {
             return;
         }
 
-        giftManager.giveGifts(player, trustLevel);
+        giftManager.giveGifts(player, trustLevel, linuxDoId);
     }
 
     /**
