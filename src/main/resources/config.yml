@@ -1,0 +1,18 @@
+# OAuth_gift_example config.yml
+# Trust level → gift items. 格式: MATERIAL[:AMOUNT]
+# TL4 始终授予 OP 权限（不在此配置）
+gifts:
+  0:
+    - "DIRT:64"
+  1:
+    - "WOODEN_PICKAXE"
+    - "WOODEN_AXE"
+    - "WOODEN_SWORD"
+  2:
+    - "STONE_PICKAXE"
+    - "STONE_AXE"
+    - "STONE_SWORD"
+  3:
+    - "IRON_PICKAXE"
+    - "IRON_AXE"
+    - "IRON_SWORD"
